@@ -62,6 +62,14 @@ user before dismissing it, then resend.
 - A tiny, exact fix (one line) is often faster to make yourself than to
   re-spec; tell the builder you changed their code so they don't revert it.
 
+## Shared memory
+
+Every member runs in the same project directory, so Claude-kind members
+share that project's auto-memory folder: a lesson one member saves, every
+later session (yours included) reads. That's useful — keep it — but crew
+members can save wrong conclusions too. Skim new memory files after a
+round and fix or delete wrong ones, the same way you review their diffs.
+
 ## Models and launching
 
 - Launch agents with `--model` (crew-up does); never switch with `/model`
