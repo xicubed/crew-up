@@ -30,7 +30,23 @@ if `herdr agent get <name>` still says `idle`, send `herdr agent send-keys
 <name> enter`. A one-off notice dialog can swallow the next prompt: ask the
 user before dismissing it, then resend.
 
+## Managing from outside Herdr (e.g. Hermes)
+
+The manager doesn't have to sit in a pane. With `"external": true` on the
+manager in `.crew/crew.json`, `bin/crew-up` gives the crew its own workspace,
+and every `herdr agent ...` command above works the same from any terminal
+(add `--machine <label>` for a crew on another machine). Waits: run
+`herdr agent wait` / `bin/crew-round` as a background command that notifies
+you when it exits, rather than polling in the foreground. Herdr can't see a
+Hermes member working, so for Hermes members ask for a token alone on their
+last line and read the pane for it (crew-round does this for you).
+
 ## A round of work
+
+`bin/crew-round <round.json>` runs a scripted round (spec → build + tests in
+parallel → gate → review) and logs it; use it when the round's steps are
+known in advance. The steps below are what it automates.
+
 
 1. **Spec** — write one spec file in your scratchpad: behaviour, exact
    wiring (which functions/files), error cases, and concrete test cases with
@@ -75,7 +91,7 @@ round and fix or delete wrong ones, the same way you review their diffs.
 - Launch agents with `--model` (crew-up does); never switch with `/model`
   inside a pane — it saves the pick as the default shared by every session
   on the machine and breaks the others.
-- Use full provider model names in the roster, not a provider's aliases.
+- Use full provider model names in the roster (`claude-sonnet-5`), not aliases.
 - Give new or unproven models read-only or tightly scoped jobs first.
 
 ## Restarting the crew

@@ -2,10 +2,13 @@
 # crew-up: start the enabled members of a crew in Herdr panes.
 #
 # Reads .crew/crew.json (found by walking up from the current directory, or
-# --config PATH). The member with role "manager" is the agent running this
-# (its pane just gets renamed); every other enabled member gets its own pane,
-# panesPerTab per tab, side by side. Members already running under their
-# name are skipped, so it is safe to run again after a crash.
+# --config PATH). The member with role "manager" leads. If it runs in a
+# Herdr pane, that pane is renamed after it and the crew fills its tab; if
+# it is "external" (e.g. Hermes in its desktop app, driving Herdr from
+# outside), or the crew runs on another machine, the crew gets a workspace
+# of its own. Every other enabled member gets its own pane, panesPerTab per
+# tab, side by side. Members already running under their name are skipped,
+# so it is safe to run again.
 #
 # Usage: crew-up [--config PATH] [--only name,name] [--dry-run] [--no-hi]
 set -euo pipefail
@@ -48,22 +51,32 @@ CREW="$(cfg '.crew // "crew"')"
 PER="$(cfg '.panesPerTab // 2')"
 PREFIX="$(cfg '.tabPrefix // "crew"')"
 MACHINE="$(cfg '.machine // empty')"
-CWD="$(cfg '.cwd // empty')"; CWD="${CWD:-$ROOT}"; CWD="${CWD/#\~/$HOME}"
+CHECKOUT="$(cfg '.checkout // "shared"')"
+WSLABEL="$(cfg '.workspace // .crew // "crew"')"
+CWD="$(cfg '.cwd // empty')"
+if [ -n "$MACHINE" ]; then
+  # A path on the remote machine: herdr wants it absolute or starting with ~/.
+  [ -n "$CWD" ] || die "\"machine\" is set, so \"cwd\" must be the project path on that machine"
+else
+  CWD="${CWD:-$ROOT}"; CWD="${CWD/#\~/$HOME}"
+fi
+case "$CHECKOUT" in shared|worktree) ;; *) die "\"checkout\" must be \"shared\" or \"worktree\"" ;; esac
+[ "$CHECKOUT" = worktree ] && [ -n "$MACHINE" ] && die "\"checkout\": \"worktree\" works on the local machine only (for now)"
 
 H=(herdr); [ -n "$MACHINE" ] && H=(herdr --machine "$MACHINE")
 
-# Local runs must happen inside a Herdr pane (the manager's).
-if [ -z "$MACHINE" ] && [ "${HERDR_ENV:-}" != 1 ] && [ $DRY = 0 ]; then
-  die "not inside a Herdr pane (HERDR_ENV != 1); start the manager in Herdr first"
-fi
+# The caller's pane context counts only for a local manager running in a
+# pane. Remote crews never use it: those IDs belong to another server.
+IN_PANE=0; [ "${HERDR_ENV:-}" = 1 ] && [ -z "$MACHINE" ] && IN_PANE=1
 
-expand() {  # ~ and project-relative paths
+expand() {  # ~ and project-relative paths (local machine)
   local p="$1"; p="${p/#\~/$HOME}"
   case "$p" in /*) echo "$p" ;; *) echo "$ROOT/$p" ;; esac
 }
 
 # In dry-run mode mutating herdr calls are printed (to stderr) instead of
 # run, and new panes get fake ids.
+PANES=(); CWDS=()
 hj() {  # hj <jq-path> <herdr args...>: run herdr, print one JSON field
   local path="$1"; shift
   if [ $DRY = 1 ]; then echo "  + ${H[*]} $*" >&2; echo "dry:pane$((${#PANES[@]} + 1))"; return; fi
@@ -74,9 +87,11 @@ hrun() {
   "${H[@]}" "$@"
 }
 
-ALIVE=""
-if [ $DRY = 0 ] || "${H[@]}" agent list >/dev/null 2>&1; then
-  ALIVE=",$("${H[@]}" agent list 2>/dev/null | jq -r '[.result.agents[].name // empty] | join(",")'),"
+ALIVE=","
+if out="$("${H[@]}" agent list 2>/dev/null)"; then
+  ALIVE=",$(echo "$out" | jq -r '[.result.agents[].name // empty] | join(",")'),"
+elif [ $DRY = 0 ]; then
+  die "can't reach the Herdr server${MACHINE:+ on $MACHINE} (run \`herdr\` there once to start it)"
 fi
 alive() { case "$ALIVE" in *",$1,"*) return 0 ;; esac; return 1; }
 
@@ -84,11 +99,17 @@ alive() { case "$ALIVE" in *",$1,"*) return 0 ;; esac; return 1; }
 MGR="$(cfg '[.members[] | select(.enabled != false and .role == "manager")][0] // empty | @base64')"
 [ -n "$MGR" ] || die "no enabled member with role \"manager\" in $CONFIG"
 mf() { echo "$MGR" | base64 --decode | jq -r "$1"; }
-MNAME="$(mf .name)"; MTITLE="$(mf '.title // .name')"
-if [ -z "$MACHINE" ] && ! alive "$MNAME"; then
+MNAME="$(mf .name)"; MTITLE="$(mf '.title // .name')"; MEXT="$(mf '.external // false')"
+if [ "$MEXT" = true ]; then
+  say "manager $MNAME is external: it drives Herdr from outside a pane"
+elif [ -z "$MACHINE" ] && [ $IN_PANE = 0 ] && [ $DRY = 0 ]; then
+  die "not inside a Herdr pane (HERDR_ENV != 1): start the manager in Herdr, or mark it \"external\": true"
+elif [ $IN_PANE = 1 ] && ! alive "$MNAME"; then
   say "naming this pane $MNAME"
   hrun agent rename "${HERDR_PANE_ID:-?}" "$MNAME" >/dev/null || say "  (couldn't rename this pane; is a recognised agent running in it?)"
 fi
+
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/crew-up/$CREW"; mkdir -p "$CACHE"
 
 # ---- who to start ---------------------------------------------------------
 TODO=()
@@ -96,7 +117,22 @@ while IFS= read -r m; do
   f() { echo "$m" | base64 --decode | jq -r "$1"; }
   name="$(f .name)"; backend="$(f '.backend // "anthropic"')"
   [ -n "$ONLY" ] && case "$ONLY" in *",$name,"*) ;; *) continue ;; esac
-  if alive "$name"; then say "$name is already running; skipping"; continue; fi
+  if alive "$name"; then
+    if [ -f "$CACHE/$name.card-pending" ]; then
+      st="$("${H[@]}" agent get "$name" 2>/dev/null | jq -r .result.agent.agent_status)"
+      if [ "$st" = idle ] || [ "$st" = done ]; then
+        say "$name is running; handing it the role card it missed"
+        hrun agent prompt "$name" "$(cat "$CACHE/$name.md")
+
+Acknowledge in one line." >/dev/null && rm -f "$CACHE/$name.card-pending"
+      else
+        say "$name is $st; its role card is still pending (answer its dialog, then run crew-up again)"
+      fi
+    else
+      say "$name is already running; skipping"
+    fi
+    continue
+  fi
   if [ "$(cfg ".backends[\"$backend\"].enabled // false")" != true ]; then
     say "$name skipped: backend \"$backend\" is not enabled"; continue
   fi
@@ -105,40 +141,78 @@ done < <(cfg '.members[] | select(.enabled != false and .role != "manager") | @b
 
 [ ${#TODO[@]} -gt 0 ] || { say "nothing to start"; exit 0; }
 
-# ---- panes: fill the manager's tab, then new tabs --------------------------
-PANES=()
-anchor=""; free=0
-if [ -z "$MACHINE" ] && [ -n "${HERDR_TAB_ID:-}" ]; then
-  used=1
-  [ $DRY = 0 ] && used="$("${H[@]}" pane list --workspace "$HERDR_WORKSPACE_ID" | jq "[.result.panes[] | select(.tab_id == \"$HERDR_TAB_ID\")] | length")"
-  free=$((PER - used)); anchor="$HERDR_PANE_ID"
-  [ "$(cfg '.tabPrefix // empty')" != "" ] && [ $used -le $PER ] && hrun tab rename "$HERDR_TAB_ID" "$PREFIX-1" >/dev/null
+# ---- worktrees ("checkout": "worktree") ------------------------------------
+# Each member gets <parent>/<repo>-<name> on branch crew/<name>, made from
+# the current HEAD; an existing one is reused. The manager merges them.
+member_cwd() {
+  local name="$1" wt
+  [ "$CHECKOUT" = shared ] && { echo "$CWD"; return; }
+  wt="$(dirname "$ROOT")/$(basename "$ROOT")-$name"
+  if [ ! -d "$wt" ]; then
+    if [ $DRY = 1 ]; then echo "  + git -C $ROOT worktree add -B crew/$name $wt" >&2
+    else git -C "$ROOT" worktree add -q -B "crew/$name" "$wt" >&2 || die "git worktree add failed for $name"; fi
+  fi
+  echo "$wt"
+}
+
+# ---- panes: the manager's tab if it has one, else the crew's workspace ------
+WS=""; anchor=""; free=0; root=""
+if [ $IN_PANE = 1 ] && [ "$MEXT" != true ]; then
+  WS="${HERDR_WORKSPACE_ID:-}"
+  if [ -n "${HERDR_TAB_ID:-}" ]; then
+    used=1
+    [ $DRY = 0 ] && used="$("${H[@]}" pane list --workspace "$WS" | jq "[.result.panes[] | select(.tab_id == \"$HERDR_TAB_ID\")] | length")"
+    free=$((PER - used)); anchor="$HERDR_PANE_ID"
+    [ "$(cfg '.tabPrefix // empty')" != "" ] && [ "$used" -le "$PER" ] && hrun tab rename "$HERDR_TAB_ID" "$PREFIX-1" >/dev/null
+  fi
+else
+  [ $DRY = 0 ] && WS="$("${H[@]}" workspace list | jq -r --arg l "$WSLABEL" '[.result.workspaces[] | select(.label == $l)][0].workspace_id // empty')"
+  if [ -n "$WS" ]; then
+    say "using workspace \"$WSLABEL\" ($WS)${MACHINE:+ on $MACHINE}"
+  elif [ $DRY = 1 ]; then
+    echo "  + ${H[*]} workspace create --label $WSLABEL --cwd $CWD --no-focus" >&2; WS="dry:ws"; root="dry:root"
+  else
+    say "creating workspace \"$WSLABEL\"${MACHINE:+ on $MACHINE}"
+    ws_json="$("${H[@]}" workspace create --label "$WSLABEL" --cwd "$CWD" --no-focus)"
+    WS="$(echo "$ws_json" | jq -r .result.workspace.workspace_id)"
+    root="$(echo "$ws_json" | jq -r .result.root_pane.pane_id)"   # first member goes here
+    hrun tab rename "$(echo "$ws_json" | jq -r .result.tab.tab_id)" "$PREFIX-1" >/dev/null || true
+  fi
 fi
+
 ntab=1
-[ $DRY = 0 ] && ntab="$("${H[@]}" tab list ${HERDR_WORKSPACE_ID:+--workspace "$HERDR_WORKSPACE_ID"} 2>/dev/null | jq "[.result.tabs[] | select(.label | startswith(\"$PREFIX-\"))] | length" 2>/dev/null || echo 1)"
+[ $DRY = 0 ] && [ -n "$WS" ] && ntab="$("${H[@]}" tab list --workspace "$WS" 2>/dev/null | jq "[.result.tabs[] | select(.label | startswith(\"$PREFIX-\"))] | length" 2>/dev/null || echo 1)"
 [ "$ntab" -ge 1 ] || ntab=1
-for _ in "${TODO[@]}"; do
-  if [ $free -gt 0 ]; then
-    p="$(hj .result.pane.pane_id pane split --pane "$anchor" --direction right --cwd "$CWD" --no-focus)"
+
+for m in "${TODO[@]}"; do
+  name="$(echo "$m" | base64 --decode | jq -r .name)"
+  mc="$(member_cwd "$name")"
+  if [ -n "$root" ]; then
+    p="$root"; root=""; free=$((PER - 1))
+    [ "$mc" != "$CWD" ] && hrun pane run "$p" "cd $(printf %q "$mc")" >/dev/null && sleep 1
+  elif [ $free -gt 0 ]; then
+    p="$(hj .result.pane.pane_id pane split --pane "$anchor" --direction right --cwd "$mc" --no-focus)"
     free=$((free - 1))
   else
     ntab=$((ntab + 1))
-    p="$(hj .result.root_pane.pane_id tab create ${HERDR_WORKSPACE_ID:+--workspace "$HERDR_WORKSPACE_ID"} --label "$PREFIX-$ntab" --cwd "$CWD" --no-focus)"
+    p="$(hj .result.root_pane.pane_id tab create ${WS:+--workspace "$WS"} --label "$PREFIX-$ntab" --cwd "$mc" --no-focus)"
     free=$((PER - 1))
   fi
   [ -n "$p" ] && [ "$p" != null ] || die "herdr didn't return a pane id"
-  PANES+=("$p"); anchor="$p"
+  # Some remote Herdr servers don't expand "~/" in --cwd: cd in the pane's own
+  # shell, which does.
+  if [ -n "$MACHINE" ]; then hrun pane run "$p" "cd $mc" >/dev/null; [ $DRY = 1 ] || sleep 1; fi
+  PANES+=("$p"); CWDS+=("$mc"); anchor="$p"
 done
 
 # ---- start each member ----------------------------------------------------
-CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/crew-up/$CREW"; mkdir -p "$CACHE"
 STARTED=()
 i=0
 for m in "${TODO[@]}"; do
   f() { echo "$m" | base64 --decode | jq -r "$1"; }
   name="$(f .name)"; title="$(f '.title // .name')"; role="$(f '.role // "builder"')"
   kind="$(f '.kind // "claude"')"; model="$(f '.model // empty')"; backend="$(f '.backend // "anthropic"')"
-  pane="${PANES[$i]}"; i=$((i + 1))
+  pane="${PANES[$i]}"; mcwd="${CWDS[$i]}"; i=$((i + 1))
 
   card=""
   for c in "$ROOT/.crew/roles/$name.md" "$ROOT/.crew/roles/$role.md" "$PLUGIN_ROOT/roles/$role.md"; do
@@ -148,33 +222,96 @@ for m in "${TODO[@]}"; do
   {
     echo "You are $title (Herdr agent name \"$name\"), the $role in the \"$CREW\" crew: coding agents in Herdr panes."
     echo "The manager is $MTITLE (\"$MNAME\"). They send you work by typing into your pane and read your reply on your screen, so answer in your pane; you can't message them any other way."
-    echo "Project directory: $CWD"
+    echo "Project directory: $mcwd"
+    [ "$CHECKOUT" = worktree ] && echo "This is your own git worktree on branch crew/$name. Commit your work there; the manager merges it."
     echo
     [ -n "$card" ] && cat "$card"
   } > "$cardfile"
 
-  args=()
-  if [ "$kind" = claude ]; then
-    settings="$(cfg ".backends[\"$backend\"].settings // empty")"
-    if [ -n "$settings" ]; then
-      settings="$(expand "$settings")"
-      [ -f "$settings" ] || { say "$name skipped: settings file missing: $settings"; continue; }
-      args+=(--settings "$settings")
-    fi
-    [ -n "$model" ] && args+=(--model "$model")
-    args+=(--append-system-prompt-file "$cardfile")
-  fi
+  # How the card and model reach the agent depends on its kind. A card file
+  # only works locally (a remote agent can't read this machine's disk), so
+  # remote and non-Claude members get the card as their first prompt.
+  args=(); card_by_prompt=1
+  case "$kind" in
+    claude)
+      settings="$(cfg ".backends[\"$backend\"].settings // empty")"
+      if [ -n "$settings" ]; then
+        if [ -n "$MACHINE" ]; then
+          case "$settings" in /*) ;; *) say "$name skipped: on a remote machine, settings must be an absolute path there"; continue ;; esac
+        else
+          settings="$(expand "$settings")"
+          [ -f "$settings" ] || { say "$name skipped: settings file missing: $settings"; continue; }
+        fi
+        args+=(--settings "$settings")
+      fi
+      [ -n "$model" ] && args+=(--model "$model")
+      if [ -z "$MACHINE" ]; then args+=(--append-system-prompt-file "$cardfile"); card_by_prompt=0; fi
+      ;;
+    hermes)
+      # -m picks the model. A "profile" keeps the member's memory, skills and
+      # accounts apart from the manager's own Hermes (strongly recommended).
+      [ -n "$model" ] && args+=(-m "$model")
+      prof="$(f '.profile // empty')"
+      [ -n "$prof" ] && args=(-p "$prof" ${args[@]+"${args[@]}"})
+      ;;
+    codex) [ -n "$model" ] && args+=(--model "$model") ;;
+  esac
+  [ "$kind" = hermes ] && args+=(--in "$mcwd")
   while IFS= read -r a; do [ -n "$a" ] && args+=("$a"); done < <(f '.args[]? // empty')
 
-  say "starting $name ($kind${model:+, $model}, $backend) in $pane"
-  if [ ${#args[@]} -gt 0 ]; then
-    hrun agent start "$name" --kind "$kind" --pane "$pane" --timeout 60000 -- "${args[@]}" >/dev/null || { say "  $name didn't start"; continue; }
-  else
-    hrun agent start "$name" --kind "$kind" --pane "$pane" --timeout 60000 >/dev/null || { say "  $name didn't start"; continue; }
+  # "command": run this executable as the agent kind. herdr agent start always
+  # launches the kind's canonical name from PATH, so put a shim named after the
+  # kind first on this pane's PATH. Use it when an install's launcher re-execs
+  # into a process Herdr can't recognise (e.g. a self-managed Hermes install:
+  # point it at the venv's bin/hermes, with HERMES_DISABLE_LAZY_INSTALLS=1 in "env").
+  cmd="$(f '.command // empty')"
+  if [ -n "$cmd" ]; then
+    if [ -n "$MACHINE" ]; then say "$name: \"command\" is local-only; using $kind from the remote PATH"
+    else
+      shim="$CACHE/bin-$name"; mkdir -p "$shim"
+      {
+        echo '#!/bin/sh'
+        f '(.env // {}) | to_entries[] | "export \(.key)=\(.value | @sh)"'
+        echo "exec $(printf %q "$(expand "$cmd")") \"\$@\""
+      } > "$shim/$kind"
+      chmod +x "$shim/$kind"
+      hrun pane run "$pane" "export PATH=$(printf %q "$shim"):\$PATH" >/dev/null; [ $DRY = 1 ] || sleep 1
+    fi
   fi
-  # Non-Claude kinds can't take a system-prompt file: send the card instead.
-  [ "$kind" != claude ] && hrun agent prompt "$name" "$(cat "$cardfile")
-Acknowledge in one line." >/dev/null
+
+  say "starting $name ($kind${model:+, $model}, $backend) in $pane"
+  # A new pane's shell can take a few seconds to reach its prompt.
+  srt=1
+  for try in 1 2 3 4 5 6 7 8; do
+    if sres="$(hrun agent start "$name" --kind "$kind" --pane "$pane" --timeout 90000 ${args[@]+-- "${args[@]}"} 2>&1)"; then srt=0; [ $DRY = 1 ] && echo "$sres" >&2; break; fi
+    echo "$sres" | grep -q agent_pane_busy || break
+    sleep 2
+  done
+  [ $srt = 0 ] || {
+    if echo "$sres" | grep -q 'blocked during startup'; then
+      say "  $name is waiting at a startup dialog (e.g. Claude's \"trust this folder\"). Answer it in"
+      say "  pane $pane yourself, then run crew-up again: it will hand $name its role card."
+      [ $card_by_prompt = 1 ] && touch "$CACHE/$name.card-pending"
+    else
+      say "  $name didn't start: $(echo "$sres" | tr '\n' ' ' | cut -c1-200)"
+    fi
+    continue
+  }
+  if [ $card_by_prompt = 1 ]; then
+    # Herdr can't see every kind working, so ask for a line we can spot: a
+    # token alone on a line (the echoed card has it mid-sentence).
+    n=$((RANDOM % 9000 + 1000))
+    hrun agent prompt "$name" "$(cat "$cardfile")
+
+Acknowledge in one line, then end with a line containing only this: ready-$n" >/dev/null
+    if [ $DRY = 0 ]; then
+      for _ in $(seq 60); do
+        "${H[@]}" agent read "$name" --source recent-unwrapped --lines 120 2>/dev/null \
+          | grep -qE "^[[:space:][:punct:]│┃]*ready-$n[[:space:][:punct:]│┃]*$" && break
+        sleep 5
+      done || true
+    fi
+  fi
   STARTED+=("$name")
 done
 
@@ -186,9 +323,13 @@ if [ $HI = 1 ] && [ ${#STARTED[@]} -gt 0 ]; then
   if [ $DRY = 0 ]; then
     sleep 5   # a prompt sometimes lands without submitting: nudge it
     for name in "${STARTED[@]}"; do
+      # Only Claude panes: a Hermes pane shows a suggestion in its empty
+      # prompt, and Herdr can't see Hermes working, so Enter could submit it.
+      k="$(cfg ".members[] | select(.name == \"$name\") | .kind // \"claude\"")"
+      [ "$k" = claude ] || continue
       st="$("${H[@]}" agent get "$name" 2>/dev/null | jq -r '.result.agent.agent_status' || true)"
       [ "$st" = idle ] && "${H[@]}" agent send-keys "$name" enter >/dev/null 2>&1 || true
     done
   fi
 fi
-say "started: ${STARTED[*]:-none}"
+say "started: ${STARTED[*]:-none}${WS:+ (workspace $WS${MACHINE:+ on $MACHINE})}"

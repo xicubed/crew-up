@@ -3,17 +3,18 @@
   "panesPerTab": 2,
   "tabPrefix": "crew",
   "machine": null,
+  "checkout": "shared",
   "backends": {
     "anthropic": { "enabled": true, "settings": null, "note": "stock Claude Code login" },
     "mindrouter": { "enabled": false, "settings": "~/path/to/settings.mindrouter.json", "note": "gitignored settings file holding the MindRouter token" },
     "local": { "enabled": false, "settings": "~/.config/crew-up/settings.local.json", "note": "Anthropic-compatible local server, e.g. Unsloth Studio or LM Studio" }
   },
   "members": [
-    { "name": "lead",    "title": "Lead",    "role": "manager", "kind": "claude", "backend": "anthropic", "model": "default", "enabled": true },
-    { "name": "builder", "title": "Builder", "role": "builder", "kind": "claude", "backend": "anthropic", "model": "sonnet",  "enabled": true },
-    { "name": "tester",  "title": "Tester",  "role": "tester",  "kind": "claude", "backend": "anthropic", "model": "sonnet",  "enabled": true },
-    { "name": "runner",  "title": "Runner",  "role": "runner",  "kind": "claude", "backend": "anthropic", "model": "haiku",   "enabled": true },
-    { "name": "critic",  "title": "Critic",  "role": "critic",  "kind": "claude", "backend": "anthropic", "model": "sonnet",  "enabled": true },
-    { "name": "docs",    "title": "Docs",    "role": "docs",    "kind": "claude", "backend": "anthropic", "model": "sonnet",  "enabled": true }
+    { "name": "lead",    "title": "Lead",    "role": "manager", "kind": "claude", "backend": "anthropic", "model": "claude-opus-5-5", "enabled": true },
+    { "name": "builder", "title": "Builder", "role": "builder", "kind": "claude", "backend": "anthropic", "model": "claude-sonnet-5", "enabled": true },
+    { "name": "tester",  "title": "Tester",  "role": "tester",  "kind": "claude", "backend": "anthropic", "model": "claude-sonnet-5", "enabled": true },
+    { "name": "runner",  "title": "Runner",  "role": "runner",  "kind": "claude", "backend": "anthropic", "model": "claude-haiku-4-5", "enabled": true },
+    { "name": "critic",  "title": "Critic",  "role": "critic",  "kind": "claude", "backend": "anthropic", "model": "claude-sonnet-5", "enabled": true },
+    { "name": "docs",    "title": "Docs",    "role": "docs",    "kind": "claude", "backend": "anthropic", "model": "claude-sonnet-5", "enabled": true }
   ]
 }

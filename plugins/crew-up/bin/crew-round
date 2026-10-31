@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# crew-round: run one round of work through a running crew, step by step.
+#
+# A round file (JSON, e.g. .crew/rounds/<name>.json) lists steps. Each step
+# prompts one or more crew members at once (in parallel), waits for all of
+# them to settle, checks that the files they were asked to write exist, and
+# logs who did what. A step marked "verify" is followed by the round's own
+# "gate" command, run by crew-round itself (verify, don't trust): if it
+# fails, the gate output goes to the "fix" member and the step repeats, up
+# to fix.max times. Everything lands in <runDir>/<round>-<stamp>/:
+# log.md (the timeline), replies/<step>-<name>.txt, gate-<n>.txt, diff.txt.
+#
+# Usage: crew-round ROUND.json [--config PATH] [--from STEP] [--run DIR] [--dry-run]
+#   --from STEP   start at this step (skip the earlier ones)
+#   --run DIR     continue an earlier run in DIR (same {run} paths; log appended),
+#                 e.g. after answering a member's dialog: --run <dir> --from build
+#
+# The crew must already be running (crew-up). Local machine only for now:
+# the checks read files and run the gate here.
+set -euo pipefail
+
+die() { echo "crew-round: $*" >&2; exit 1; }
+say() { echo "crew-round: $*"; }
+
+ROUND=""; CONFIG=""; FROM=""; RUNARG=""; DRY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config) CONFIG="$2"; shift 2 ;;
+    --from) FROM="$2"; shift 2 ;;
+    --run) RUNARG="$2"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -*) die "unknown option: $1" ;;
+    *) ROUND="$1"; shift ;;
+  esac
+done
+[ -n "$ROUND" ] || die "usage: crew-round ROUND.json [--config PATH] [--from STEP] [--run DIR] [--dry-run]"
+[ -f "$ROUND" ] || die "round file not found: $ROUND"
+command -v jq >/dev/null || die "needs jq"
+command -v herdr >/dev/null || die "needs herdr on PATH"
+jq empty "$ROUND" 2>/dev/null || die "not valid JSON: $ROUND"
+ROUND="$(cd "$(dirname "$ROUND")" && pwd)/$(basename "$ROUND")"
+
+if [ -z "$CONFIG" ]; then
+  d="$(dirname "$ROUND")"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/.crew/crew.json" ] && CONFIG="$d/.crew/crew.json" && break
+    d="$(dirname "$d")"
+  done
+  [ -n "$CONFIG" ] || die "no .crew/crew.json above the round file"
+fi
+ROOT="$(cd "$(dirname "$CONFIG")/.." && pwd)"
+[ -z "$(jq -r '.machine // empty' "$CONFIG")" ] || die "remote crews aren't supported by crew-round yet"
+cd "$ROOT"
+
+r() { jq -r "$1" "$ROUND"; }
+NAME="$(r '.round // "round"')"
+QUEST="$(r '.quest // empty')"
+RUNS="$(r '.runDir // ".crew/runs"')"
+GATE="$(r '.gate // empty')"
+FIXWHO="$(r '.fix.who // empty')"; FIXMAX="$(r '.fix.max // 2')"
+TIMEOUT="$(r '.timeoutMinutes // 30')"; TMS=$((TIMEOUT * 60000))
+STAMP="$(date +%Y%m%d-%H%M)"
+if [ -n "$RUNARG" ]; then
+  [ -f "$RUNARG/log.md" ] || die "no earlier run at $RUNARG"
+  RUN="${RUNARG%/}"; RUN="${RUN#$ROOT/}"
+else
+  RUN="$RUNS/$NAME-$STAMP"
+fi
+mkdir -p "$RUN/replies"
+LOG="$RUN/log.md"
+
+log() { echo "$*" >> "$LOG"; }
+now() { date +%H:%M:%S; }
+fill() {  # placeholders: {run} {quest} {round} {root}
+  local s="$1"; s="${s//\{run\}/$RUN}"; s="${s//\{quest\}/$QUEST}"
+  s="${s//\{round\}/$NAME}"; s="${s//\{root\}/$ROOT}"; printf '%s' "$s"
+}
+
+if [ -n "$RUNARG" ]; then
+  { echo; echo "# Continued $(date '+%Y-%m-%d %H:%M %Z')${FROM:+ from step \`$FROM\`}"; echo; } >> "$LOG"
+else
+{
+  echo "# Round \`$NAME\` — $(date '+%Y-%m-%d %H:%M %Z')"
+  echo
+  echo "- Round file: \`${ROUND#$ROOT/}\`"
+  [ -n "$QUEST" ] && echo "- Quest: \`$QUEST\`"
+  echo "- Crew: $(jq -r '[.members[] | select(.enabled != false) | "\(.name) (\(.role), \(.model // .kind))"] | join(", ")' "$CONFIG")"
+  echo "- Start commit: \`$(git rev-parse --short HEAD 2>/dev/null || echo none)\`"
+  echo
+} > "$LOG"
+fi
+
+alive_names="$(herdr agent list 2>/dev/null | jq -r '.result.agents[].name' || true)"
+need_alive() {
+  [ $DRY = 1 ] && return 0
+  echo "$alive_names" | grep -qx "$1" || die "$1 isn't running (start the crew with crew-up first)"
+}
+
+# prompt_wait <name> <text> <replyfile>: submit, wait until finished, save the reply.
+#
+# "Finished" is checked two ways. Herdr's --wait sees working → idle for agents
+# whose state it can read (Claude). Some can't be read (Hermes: Herdr never sees
+# it working), so every prompt also asks the member to end with a line holding
+# only a random token, and we poll the pane for that line (the echoed prompt
+# has the token mid-sentence, never alone on a line). A Claude member that settles without the line gets a short
+# grace period, then counts as done (it may have answered with a question).
+prompt_wait() {
+  local who="$1" text="$2" out="$3" res st n blind kind waited=0
+  if [ $DRY = 1 ]; then printf '%s\n' "[dry-run] would prompt $who:" "$text" > "$out"; echo done; return; fi
+  kind="$(jq -r --arg n "$who" '.members[] | select(.name == $n) | .kind // "claude"' "$CONFIG")"
+  blind=0; [ "$kind" = claude ] || blind=1
+  n=$((RANDOM % 9000 + 1000))
+  text="$text
+
+When you have completely finished, end your reply with a line containing only this: done-$n"
+  st="$(herdr agent get "$who" | jq -r .result.agent.agent_status)"
+  [ "$st" = blocked ] && { echo blocked; return; }
+  res="$(herdr agent prompt "$who" "$text" --wait --timeout "$TMS" 2>&1)" || true
+  if echo "$res" | grep -q '"code":"agent_blocked"'; then echo blocked; return; fi
+  if echo "$res" | grep -q '"code":"agent_prompt_stalled"' && [ $blind = 0 ]; then
+    # Claude only: a prompt sometimes lands without submitting.
+    herdr agent send-keys "$who" enter >/dev/null 2>&1 || true
+    herdr agent wait "$who" --timeout "$TMS" >/dev/null 2>&1 || true
+  fi
+  while :; do
+    herdr agent read "$who" --source recent-unwrapped --lines 400 > "$out" 2>/dev/null || true
+    # The token alone on a line is the reply; the echoed prompt has it mid-line.
+    grep -qE "^[[:space:][:punct:]│┃]*done-$n[[:space:][:punct:]│┃]*$" "$out" && { echo done; return; }
+    st="$(herdr agent get "$who" | jq -r .result.agent.agent_status)"
+    [ "$st" = blocked ] && { echo blocked; return; }
+    if [ $blind = 0 ] && [ "$st" != working ] && [ $waited -ge 15 ]; then echo "idle (no done line)"; return; fi
+    [ $((waited * 1000)) -ge "$TMS" ] && { echo timeout; return; }
+    sleep 5; waited=$((waited + 5))
+  done
+}
+
+# run_step <index>: prompt every member of the step in parallel, wait, check.
+run_step() {
+  local i="$1" id who_json n t0 ok=1
+  id="$(r ".steps[$i].id")"; who_json="$(r ".steps[$i].who | if type == \"array\" then . else [.] end")"
+  t0=$(date +%s)
+  log "## Step \`$id\` ($(now))"
+  local pids=() names=() files=()
+  while IFS= read -r n; do
+    need_alive "$n"
+    local text
+    text="$(jq -r --arg n "$n" --argjson i "$i" '.steps[$i].prompt | if type == "object" then .[$n] else . end // empty' "$ROUND")"
+    [ -n "$text" ] || die "step $id has no prompt for $n"
+    text="$(fill "$text")"
+    [ -n "${EXTRA:-}" ] && text="$text
+
+$EXTRA"
+    log "- → **$n**: $(printf '%s' "$text" | head -c 300 | tr '\n' ' ')$( [ ${#text} -gt 300 ] && echo …)"
+    local f="$RUN/replies/$id-$n.txt"
+    ( prompt_wait "$n" "$text" "$f" > "$f.status" ) &
+    pids+=($!); names+=("$n"); files+=("$f")
+  done < <(echo "$who_json" | jq -r '.[]')
+  local k st
+  for k in "${!pids[@]}"; do
+    wait "${pids[$k]}" || true
+    st="$(cat "${files[$k]}.status" 2>/dev/null || echo unknown)"; rm -f "${files[$k]}.status"
+    log "- ← **${names[$k]}**: $st (reply: \`${files[$k]#$ROOT/}\`)"
+    case "$st" in idle*|done) ;; blocked) ok=0; log "  - BLOCKED: ${names[$k]} is waiting at an approval or question; a human must look." ;; *) ok=0 ;; esac
+  done
+  local e missing=0
+  while IFS= read -r e; do
+    [ -n "$e" ] || continue; e="$(fill "$e")"
+    if [ $DRY = 1 ] || [ -s "$e" ]; then log "- ✓ \`$e\`"; else log "- ✗ missing \`$e\`"; missing=1; fi
+  done < <(r ".steps[$i].expect[]? // empty")
+  [ $missing = 1 ] && ok=0
+  log "- $(($(date +%s) - t0))s; working tree: $(git diff --shortstat 2>/dev/null | sed 's/^ //' || true)$(n=$(git ls-files --others --exclude-standard | grep -vc "^${RUN#./}" || true); [ "$n" -gt 0 ] && echo ", $n new file(s)")"
+  log ""
+  [ $ok = 1 ]
+}
+
+run_gate() {  # run_gate <n>: the round's gate, run here, never by an agent
+  local n="$1" f="$RUN/gate-$1.txt" rc=0
+  [ -n "$GATE" ] || return 0
+  if [ $DRY = 1 ]; then log "- gate (dry-run): \`$GATE\`"; return 0; fi
+  say "gate $n: $GATE"
+  bash -c "$GATE" > "$f" 2>&1 || rc=$?
+  log "- **gate $n** (\`$GATE\`): $([ $rc = 0 ] && echo PASS || echo "FAIL (exit $rc)") — \`${f#$ROOT/}\`"
+  log ""
+  return $rc
+}
+
+say "run $RUN"
+nsteps="$(r '.steps | length')"
+started=0; [ -z "$FROM" ] && started=1
+result=PASS
+for ((s = 0; s < nsteps; s++)); do
+  id="$(r ".steps[$s].id")"
+  [ $started = 0 ] && [ "$id" = "$FROM" ] && started=1
+  [ $started = 1 ] || continue
+  say "step $id: $(r ".steps[$s].who | if type == \"array\" then join(\", \") else . end")"
+  EXTRA=""
+  if ! run_step "$s"; then result="STOPPED at $id"; say "step $id didn't finish cleanly; see $LOG"; break; fi
+  if [ "$(r ".steps[$s].verify // false")" = true ]; then
+    tries=0
+    until run_gate "$((tries + 1))"; do
+      tries=$((tries + 1))
+      if [ -z "$FIXWHO" ] || [ $tries -gt "$FIXMAX" ]; then result="GATE FAILED after $tries fix round(s)"; break 2; fi
+      say "gate failed; fix round $tries → $FIXWHO"
+      log "## Fix round $tries → $FIXWHO ($(now))"
+      fixtext="The gate failed. Its output (last 60 lines) is below and in full at $RUN/gate-$tries.txt. Fix the source so it passes; don't edit tests unless a test contradicts the spec. Reply with git diff --stat.
+
+$(tail -60 "$RUN/gate-$tries.txt")"
+      st="$(prompt_wait "$FIXWHO" "$fixtext" "$RUN/replies/fix-$tries-$FIXWHO.txt")"
+      log "- ← **$FIXWHO**: $st"; log ""
+      case "$st" in idle*|done) ;; *) result="STOPPED in fix round $tries ($st)"; break 2 ;; esac
+      EXTRA="(Re-check after fix round $tries.)"
+      run_step "$s" || { result="STOPPED at $id (after fix $tries)"; break 2; }
+    done
+  fi
+done
+
+git diff > "$RUN/diff.txt" 2>/dev/null || true
+{
+  echo "## Result: $result ($(now))"
+  echo
+  echo '```'
+  git status --short 2>/dev/null | grep -v "^?? ${RUN#./}" || true
+  echo '```'
+  echo
+  echo "Nothing is committed: the manager reviews \`diff.txt\` and commits with the human's go-ahead."
+} >> "$LOG"
+say "$result — log: $LOG"
+[ "$result" = PASS ]
