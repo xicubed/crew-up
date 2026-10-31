@@ -312,6 +312,9 @@ Acknowledge in one line, then end with a line containing only this: ready-$n" >/
       done || true
     fi
   fi
+  # Label the pane with the member's name: otherwise Herdr shows whatever the
+  # agent puts in its terminal title (Hermes shows its version, Claude its task).
+  hrun pane rename "$pane" "$name" >/dev/null 2>&1 || true
   STARTED+=("$name")
 done
 
