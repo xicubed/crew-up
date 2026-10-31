@@ -1,0 +1,16 @@
+{
+  "model": "qwen/qwen3.8-27b",
+  "env": {
+    "ANTHROPIC_BASE_URL": "https://mindrouter.uidaho.edu",
+    "ANTHROPIC_AUTH_TOKEN": "PUT-YOUR-TOKEN-HERE",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen/qwen3.6-35b",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen/qwen3.8-27b",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen/qwen3.5-122b",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "qwen/qwen3.8-27b",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "DISABLE_AUTOUPDATER": "1"
+  },
+  "skipWebFetchPreflight": true
+}

@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+# crew-up: start the enabled members of a crew in Herdr panes.
+#
+# Reads .crew/crew.json (found by walking up from the current directory, or
+# --config PATH). The member with role "manager" is the agent running this
+# (its pane just gets renamed); every other enabled member gets its own pane,
+# panesPerTab per tab, side by side. Members already running under their
+# name are skipped, so it is safe to run again after a crash.
+#
+# Usage: crew-up [--config PATH] [--only name,name] [--dry-run] [--no-hi]
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CONFIG=""; ONLY=""; DRY=0; HI=1
+
+die() { echo "crew-up: $*" >&2; exit 1; }
+say() { echo "crew-up: $*"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config) CONFIG="$2"; shift 2 ;;
+    --only) ONLY=",$2,"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    --no-hi) HI=0; shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+command -v jq >/dev/null || die "needs jq"
+command -v herdr >/dev/null || die "needs herdr on PATH"
+
+# ---- find the config ------------------------------------------------------
+if [ -z "$CONFIG" ]; then
+  d="$PWD"
+  while [ "$d" != "/" ]; do
+    [ -f "$d/.crew/crew.json" ] && CONFIG="$d/.crew/crew.json" && break
+    d="$(dirname "$d")"
+  done
+  [ -n "$CONFIG" ] || die "no .crew/crew.json here or above; run /crew-setup (or copy $PLUGIN_ROOT/templates/crew.json)"
+fi
+[ -f "$CONFIG" ] || die "config not found: $CONFIG"
+jq empty "$CONFIG" 2>/dev/null || die "not valid JSON: $CONFIG"
+ROOT="$(cd "$(dirname "$CONFIG")/.." && pwd)"
+
+cfg() { jq -r "$1" "$CONFIG"; }
+CREW="$(cfg '.crew // "crew"')"
+PER="$(cfg '.panesPerTab // 2')"
+PREFIX="$(cfg '.tabPrefix // "crew"')"
+MACHINE="$(cfg '.machine // empty')"
+CWD="$(cfg '.cwd // empty')"; CWD="${CWD:-$ROOT}"; CWD="${CWD/#\~/$HOME}"
+
+H=(herdr); [ -n "$MACHINE" ] && H=(herdr --machine "$MACHINE")
+
+# Local runs must happen inside a Herdr pane (the manager's).
+if [ -z "$MACHINE" ] && [ "${HERDR_ENV:-}" != 1 ] && [ $DRY = 0 ]; then
+  die "not inside a Herdr pane (HERDR_ENV != 1); start the manager in Herdr first"
+fi
+
+expand() {  # ~ and project-relative paths
+  local p="$1"; p="${p/#\~/$HOME}"
+  case "$p" in /*) echo "$p" ;; *) echo "$ROOT/$p" ;; esac
+}
+
+# In dry-run mode mutating herdr calls are printed (to stderr) instead of
+# run, and new panes get fake ids.
+hj() {  # hj <jq-path> <herdr args...>: run herdr, print one JSON field
+  local path="$1"; shift
+  if [ $DRY = 1 ]; then echo "  + ${H[*]} $*" >&2; echo "dry:pane$((${#PANES[@]} + 1))"; return; fi
+  "${H[@]}" "$@" | jq -r "$path"
+}
+hrun() {
+  if [ $DRY = 1 ]; then echo "  + ${H[*]} $*" >&2; return 0; fi
+  "${H[@]}" "$@"
+}
+
+ALIVE=""
+if [ $DRY = 0 ] || "${H[@]}" agent list >/dev/null 2>&1; then
+  ALIVE=",$("${H[@]}" agent list 2>/dev/null | jq -r '[.result.agents[].name // empty] | join(",")'),"
+fi
+alive() { case "$ALIVE" in *",$1,"*) return 0 ;; esac; return 1; }
+
+# ---- manager --------------------------------------------------------------
+MGR="$(cfg '[.members[] | select(.enabled != false and .role == "manager")][0] // empty | @base64')"
+[ -n "$MGR" ] || die "no enabled member with role \"manager\" in $CONFIG"
+mf() { echo "$MGR" | base64 --decode | jq -r "$1"; }
+MNAME="$(mf .name)"; MTITLE="$(mf '.title // .name')"
+if [ -z "$MACHINE" ] && ! alive "$MNAME"; then
+  say "naming this pane $MNAME"
+  hrun agent rename "${HERDR_PANE_ID:-?}" "$MNAME" >/dev/null || say "  (couldn't rename this pane; is a recognised agent running in it?)"
+fi
+
+# ---- who to start ---------------------------------------------------------
+TODO=()
+while IFS= read -r m; do
+  f() { echo "$m" | base64 --decode | jq -r "$1"; }
+  name="$(f .name)"; backend="$(f '.backend // "anthropic"')"
+  [ -n "$ONLY" ] && case "$ONLY" in *",$name,"*) ;; *) continue ;; esac
+  if alive "$name"; then say "$name is already running; skipping"; continue; fi
+  if [ "$(cfg ".backends[\"$backend\"].enabled // false")" != true ]; then
+    say "$name skipped: backend \"$backend\" is not enabled"; continue
+  fi
+  TODO+=("$m")
+done < <(cfg '.members[] | select(.enabled != false and .role != "manager") | @base64')
+
+[ ${#TODO[@]} -gt 0 ] || { say "nothing to start"; exit 0; }
+
+# ---- panes: fill the manager's tab, then new tabs --------------------------
+PANES=()
+anchor=""; free=0
+if [ -z "$MACHINE" ] && [ -n "${HERDR_TAB_ID:-}" ]; then
+  used=1
+  [ $DRY = 0 ] && used="$("${H[@]}" pane list --workspace "$HERDR_WORKSPACE_ID" | jq "[.result.panes[] | select(.tab_id == \"$HERDR_TAB_ID\")] | length")"
+  free=$((PER - used)); anchor="$HERDR_PANE_ID"
+  [ "$(cfg '.tabPrefix // empty')" != "" ] && [ $used -le $PER ] && hrun tab rename "$HERDR_TAB_ID" "$PREFIX-1" >/dev/null
+fi
+ntab=1
+[ $DRY = 0 ] && ntab="$("${H[@]}" tab list ${HERDR_WORKSPACE_ID:+--workspace "$HERDR_WORKSPACE_ID"} 2>/dev/null | jq "[.result.tabs[] | select(.label | startswith(\"$PREFIX-\"))] | length" 2>/dev/null || echo 1)"
+[ "$ntab" -ge 1 ] || ntab=1
+for _ in "${TODO[@]}"; do
+  if [ $free -gt 0 ]; then
+    p="$(hj .result.pane.pane_id pane split --pane "$anchor" --direction right --cwd "$CWD" --no-focus)"
+    free=$((free - 1))
+  else
+    ntab=$((ntab + 1))
+    p="$(hj .result.root_pane.pane_id tab create ${HERDR_WORKSPACE_ID:+--workspace "$HERDR_WORKSPACE_ID"} --label "$PREFIX-$ntab" --cwd "$CWD" --no-focus)"
+    free=$((PER - 1))
+  fi
+  [ -n "$p" ] && [ "$p" != null ] || die "herdr didn't return a pane id"
+  PANES+=("$p"); anchor="$p"
+done
+
+# ---- start each member ----------------------------------------------------
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/crew-up/$CREW"; mkdir -p "$CACHE"
+STARTED=()
+i=0
+for m in "${TODO[@]}"; do
+  f() { echo "$m" | base64 --decode | jq -r "$1"; }
+  name="$(f .name)"; title="$(f '.title // .name')"; role="$(f '.role // "builder"')"
+  kind="$(f '.kind // "claude"')"; model="$(f '.model // empty')"; backend="$(f '.backend // "anthropic"')"
+  pane="${PANES[$i]}"; i=$((i + 1))
+
+  card=""
+  for c in "$ROOT/.crew/roles/$name.md" "$ROOT/.crew/roles/$role.md" "$PLUGIN_ROOT/roles/$role.md"; do
+    [ -f "$c" ] && card="$c" && break
+  done
+  cardfile="$CACHE/$name.md"
+  {
+    echo "You are $title (Herdr agent name \"$name\"), the $role in the \"$CREW\" crew: coding agents in Herdr panes."
+    echo "The manager is $MTITLE (\"$MNAME\"). They send you work by typing into your pane and read your reply on your screen, so answer in your pane; you can't message them any other way."
+    echo "Project directory: $CWD"
+    echo
+    [ -n "$card" ] && cat "$card"
+  } > "$cardfile"
+
+  args=()
+  if [ "$kind" = claude ]; then
+    settings="$(cfg ".backends[\"$backend\"].settings // empty")"
+    if [ -n "$settings" ]; then
+      settings="$(expand "$settings")"
+      [ -f "$settings" ] || { say "$name skipped: settings file missing: $settings"; continue; }
+      args+=(--settings "$settings")
+    fi
+    [ -n "$model" ] && args+=(--model "$model")
+    args+=(--append-system-prompt-file "$cardfile")
+  fi
+  while IFS= read -r a; do [ -n "$a" ] && args+=("$a"); done < <(f '.args[]? // empty')
+
+  say "starting $name ($kind${model:+, $model}, $backend) in $pane"
+  if [ ${#args[@]} -gt 0 ]; then
+    hrun agent start "$name" --kind "$kind" --pane "$pane" --timeout 60000 -- "${args[@]}" >/dev/null || { say "  $name didn't start"; continue; }
+  else
+    hrun agent start "$name" --kind "$kind" --pane "$pane" --timeout 60000 >/dev/null || { say "  $name didn't start"; continue; }
+  fi
+  # Non-Claude kinds can't take a system-prompt file: send the card instead.
+  [ "$kind" != claude ] && hrun agent prompt "$name" "$(cat "$cardfile")
+Acknowledge in one line." >/dev/null
+  STARTED+=("$name")
+done
+
+# ---- say hi ---------------------------------------------------------------
+if [ $HI = 1 ] && [ ${#STARTED[@]} -gt 0 ]; then
+  for name in "${STARTED[@]}"; do
+    hrun agent prompt "$name" "Say hi in ONE line: your name, your job, and the model you're running on. Don't use any tools." >/dev/null || true
+  done
+  if [ $DRY = 0 ]; then
+    sleep 5   # a prompt sometimes lands without submitting: nudge it
+    for name in "${STARTED[@]}"; do
+      st="$("${H[@]}" agent get "$name" 2>/dev/null | jq -r '.result.agent.agent_status' || true)"
+      [ "$st" = idle ] && "${H[@]}" agent send-keys "$name" enter >/dev/null 2>&1 || true
+    done
+  fi
+fi
+say "started: ${STARTED[*]:-none}"

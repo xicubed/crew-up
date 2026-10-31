@@ -1,0 +1,9 @@
+{
+  "name": "paren-repair",
+  "version": "0.1.0",
+  "description": "Fix mismatched Clojure delimiters on every Write/Edit (needs clojure-mcp-light's clj-paren-repair-claude-hook).",
+  "author": {
+    "name": "mikel"
+  },
+  "license": "MIT"
+}

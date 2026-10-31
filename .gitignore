@@ -1,0 +1,4 @@
+.DS_Store
+# backend settings files hold tokens; never commit them
+settings.*.json
+!**/templates/settings.*.example.json
