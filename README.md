@@ -25,7 +25,7 @@ playbook and run the script.
    `... install hermes`, etc.).
 2. Add this marketplace and install the plugin(s):
    ```
-   claude plugin marketplace add ~/exp/crew-up        # or the git URL
+   claude plugin marketplace add xicubed/crew-up     # GitHub; or a local clone's path
    claude plugin install crew-up@crew-up
    claude plugin install paren-repair@crew-up         # optional, Clojure only
    ```
