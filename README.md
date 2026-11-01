@@ -79,7 +79,7 @@ Member fields:
 
 - `name` — the Herdr agent name: `[a-z][a-z0-9_-]{0,31}`, unique.
 - `title` — display name used in the role card.
-- `role` — `manager` (exactly one, enabled), `builder`, `tester`, `runner`,
+- `role` — `manager` (exactly one, enabled), `architect`, `builder`, `tester`, `runner`,
   `critic`, `docs`, or your own. The role card is the first that exists of
   `.crew/roles/<name>.md`, `.crew/roles/<role>.md`, `plugins/crew-up/roles/<role>.md`.
 - `kind` — any `herdr agent` kind: `claude`, `hermes`, `codex`, `gemini`, ...
