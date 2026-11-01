@@ -41,6 +41,20 @@ driving Herdr from outside it (e.g. Hermes in its desktop app: see
    for an Anthropic manager), `cd` to the project, and run `/crew-setup` once,
    then `/crew-up`.
 
+### Updating
+
+Pull the latest from GitHub, then update the installed plugin(s) and restart
+Claude Code (running crew members keep the old version until restarted):
+
+```
+claude plugin marketplace update crew-up
+claude plugin update crew-up@crew-up
+claude plugin update paren-repair@crew-up          # if installed
+```
+
+A Hermes manager that runs `bin/crew-up` from a clone just needs `git pull`
+in that clone.
+
 ## crew.json
 
 Lives at `<project>/.crew/crew.json`; commit it (no secrets in it).
