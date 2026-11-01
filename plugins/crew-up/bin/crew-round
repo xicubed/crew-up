@@ -115,9 +115,9 @@ prompt_wait() {
 
 When you have completely finished, end your reply with a line containing only this: done-$n"
   st="$(herdr agent get "$who" | jq -r .result.agent.agent_status)"
-  [ "$st" = blocked ] && { echo blocked; return; }
+  [ "$st" = blocked ] && { herdr agent read "$who" --source visible > "$out" 2>/dev/null || true; echo blocked; return; }
   res="$(herdr agent prompt "$who" "$text" --wait --timeout "$TMS" 2>&1)" || true
-  if echo "$res" | grep -q '"code":"agent_blocked"'; then echo blocked; return; fi
+  if echo "$res" | grep -q '"code":"agent_blocked"'; then herdr agent read "$who" --source visible > "$out" 2>/dev/null || true; echo blocked; return; fi
   if echo "$res" | grep -q '"code":"agent_prompt_stalled"' && [ $blind = 0 ]; then
     # Claude only: a prompt sometimes lands without submitting.
     herdr agent send-keys "$who" enter >/dev/null 2>&1 || true
@@ -128,7 +128,7 @@ When you have completely finished, end your reply with a line containing only th
     # The token alone on a line is the reply; the echoed prompt has it mid-line.
     grep -qE "^[[:space:][:punct:]│┃]*done-$n[[:space:][:punct:]│┃]*$" "$out" && { echo done; return; }
     st="$(herdr agent get "$who" | jq -r .result.agent.agent_status)"
-    [ "$st" = blocked ] && { echo blocked; return; }
+    [ "$st" = blocked ] && { herdr agent read "$who" --source visible > "$out" 2>/dev/null || true; echo blocked; return; }
     if [ $blind = 0 ] && [ "$st" != working ] && [ $waited -ge 15 ]; then echo "idle (no done line)"; return; fi
     [ $((waited * 1000)) -ge "$TMS" ] && { echo timeout; return; }
     sleep 5; waited=$((waited + 5))
