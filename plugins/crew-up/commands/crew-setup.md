@@ -35,7 +35,7 @@ backend, model, on/off), the enabled backends, `panesPerTab`, and `machine`.
 
 For each change picked, ask what you need (plain questions are fine):
 - **Add a member**: name (Herdr rule: `[a-z][a-z0-9_-]{0,31}`, unique),
-  title, role (`builder`, `tester`, `runner`, `critic`, `docs`, or a new
+  title, role (`architect`, `builder`, `tester`, `runner`, `critic`, `docs`, or a new
   role — then write a role card at `.crew/roles/<role>.md`), kind (`claude`,
   `hermes`, `codex`, ... — `herdr agent` lists the kinds), backend, model.
   Non-claude kinds can carry their own CLI flags in an `"args"` array.

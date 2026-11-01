@@ -48,7 +48,8 @@ parallel → gate → review) and logs it; use it when the round's steps are
 known in advance. The steps below are what it automates.
 
 
-1. **Spec** — write one spec file in your scratchpad: behaviour, exact
+1. **Spec** — write one spec file in your scratchpad (or have the
+   `architect` write it from a quest file and check its hand-worked values): behaviour, exact
    wiring (which functions/files), error cases, and concrete test cases with
    expected values you have checked by hand. Small rounds: one
    well-specified change per round; tangled multi-bug rounds bog down.
@@ -75,6 +76,17 @@ known in advance. The steps below are what it automates.
   `--headless=new --screenshot=out.png --window-size=1000,1040
   --virtual-time-budget=3000 file:///abs/path.html`, then read the PNG.
   Every visual round checked this way caught bugs the passing tests missed.
+- **Run the gate yourself, unpiped**: `gate.sh | tail -1 && git commit`
+  commits on a FAIL (the pipe's status is `tail`'s). Use
+  `gate.sh > log && git commit`.
+- **Permission prompts mid-round** are yours to answer. Decline
+  `git add` (even `-N`) and whole-disk searches, and tell the member the
+  alternative in the same prompt (`git diff --no-index --stat /dev/null
+  <file>`); then fix the role card so it doesn't recur. crew-round saves a
+  blocked member's screen as its reply, so the dialog is in the run log.
+- **Log your own mid-round edits** (role cards, a hand fix) in the run's
+  log under "Manager notes": the critic sees them in the diff and will
+  flag them as out of the spec's scope otherwise.
 - A tiny, exact fix (one line) is often faster to make yourself than to
   re-spec; tell the builder you changed their code so they don't revert it.
 

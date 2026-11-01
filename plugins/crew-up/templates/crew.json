@@ -11,6 +11,7 @@
   },
   "members": [
     { "name": "lead",    "title": "Lead",    "role": "manager", "kind": "claude", "backend": "anthropic", "model": "claude-opus-5-5", "enabled": true },
+    { "name": "architect", "title": "Architect", "role": "architect", "kind": "claude", "backend": "anthropic", "model": "claude-opus-5-5", "enabled": false },
     { "name": "builder", "title": "Builder", "role": "builder", "kind": "claude", "backend": "anthropic", "model": "claude-sonnet-5", "enabled": true },
     { "name": "tester",  "title": "Tester",  "role": "tester",  "kind": "claude", "backend": "anthropic", "model": "claude-sonnet-5", "enabled": true },
     { "name": "runner",  "title": "Runner",  "role": "runner",  "kind": "claude", "backend": "anthropic", "model": "claude-haiku-4-5", "enabled": true },
