@@ -112,6 +112,13 @@ Member fields:
   isn't stopped by permission prompts).
 - `external` — manager only: `true` when the manager isn't in a Herdr pane
   and drives Herdr from outside (crew-up then makes the crew a workspace).
+- `machine`, `cwd` — per member: run this one member on another machine
+  (a `herdr machine` label), in the project's clone at `cwd` there. crew-up
+  starts the rest of the crew first, then gives each machine its own
+  workspace (same name) for its members. Use it for e.g. a runner that proves
+  the pushed code builds on a second OS. The crew-level `machine` still moves
+  the whole crew. A new folder on that machine stops Claude at its "trust
+  this folder" dialog: answer it there, then re-run crew-up.
 - `profile` — Hermes only: the Hermes profile to run in (`hermes -p <profile>`).
 - `command`, `env` — run this executable as the member's kind, with these
   environment variables. For installs whose launcher re-execs into a process

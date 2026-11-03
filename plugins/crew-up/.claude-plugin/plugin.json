@@ -1,6 +1,6 @@
 {
   "name": "crew-up",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Start, configure and manage a crew of coding agents in Herdr panes, led by one manager agent.",
   "author": {
     "name": "mikel"

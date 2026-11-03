@@ -8,7 +8,8 @@
 # outside), or the crew runs on another machine, the crew gets a workspace
 # of its own. Every other enabled member gets its own pane, panesPerTab per
 # tab, side by side. Members already running under their name are skipped,
-# so it is safe to run again.
+# so it is safe to run again. A member with its own "machine" (and "cwd"
+# there) starts on that machine, in a workspace of the same name.
 #
 # Usage: crew-up [--config PATH] [--only name,name] [--dry-run] [--no-hi]
 set -euo pipefail
@@ -25,7 +26,7 @@ while [ $# -gt 0 ]; do
     --only) ONLY=",$2,"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --no-hi) HI=0; shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -44,7 +45,29 @@ if [ -z "$CONFIG" ]; then
 fi
 [ -f "$CONFIG" ] || die "config not found: $CONFIG"
 jq empty "$CONFIG" 2>/dev/null || die "not valid JSON: $CONFIG"
-ROOT="$(cd "$(dirname "$CONFIG")/.." && pwd)"
+ROOT="${CREWUP_ROOT:-$(cd "$(dirname "$CONFIG")/.." && pwd)}"
+
+# ---- members on other machines --------------------------------------------
+# A member may set its own "machine" (plus "cwd", the project path there).
+# crew-up then runs one pass per machine from a derived config: first the
+# members without a machine of their own (on the crew's machine, local by
+# default), then each machine's members in a workspace on that machine.
+if [ -z "${CREWUP_PASS:-}" ] && jq -e '[.members[] | select(.enabled != false and .role != "manager" and (.machine // "") != "")] | length > 0' "$CONFIG" >/dev/null; then
+  PASSDIR="$(mktemp -d)"; trap 'rm -rf "$PASSDIR"' EXIT
+  fwd=(); [ -n "$ONLY" ] && fwd+=(--only "${ONLY:1:${#ONLY}-2}")
+  [ $DRY = 1 ] && fwd+=(--dry-run); [ $HI = 0 ] && fwd+=(--no-hi)
+  rc=0
+  jq '.members |= map(select(.role == "manager" or (.machine // "") == ""))' "$CONFIG" > "$PASSDIR/home.json"
+  CREWUP_PASS=1 CREWUP_ROOT="$ROOT" "$0" --config "$PASSDIR/home.json" ${fwd[@]+"${fwd[@]}"} || rc=1
+  while IFS= read -r mach; do
+    mcwd="$(jq -r --arg m "$mach" '[.members[] | select(.machine == $m) | .cwd // empty][0] // empty' "$CONFIG")"
+    [ -n "$mcwd" ] || die "members on $mach need \"cwd\": the project path on that machine"
+    jq --arg m "$mach" --arg c "$mcwd" '.machine = $m | .cwd = $c | .members |= map(select(.role == "manager" or .machine == $m))' "$CONFIG" > "$PASSDIR/m-$mach.json"
+    say "members on $mach:"
+    CREWUP_PASS=1 CREWUP_ROOT="$ROOT" "$0" --config "$PASSDIR/m-$mach.json" ${fwd[@]+"${fwd[@]}"} || rc=1
+  done < <(jq -r '[.members[] | select(.enabled != false and .role != "manager") | .machine // empty] | unique | .[]' "$CONFIG")
+  exit $rc
+fi
 
 cfg() { jq -r "$1" "$CONFIG"; }
 CREW="$(cfg '.crew // "crew"')"
