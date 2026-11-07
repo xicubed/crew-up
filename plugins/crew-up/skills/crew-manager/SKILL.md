@@ -84,6 +84,14 @@ known in advance. The steps below are what it automates.
   alternative in the same prompt (`git diff --no-index --stat /dev/null
   <file>`); then fix the role card so it doesn't recur. crew-round saves a
   blocked member's screen as its reply, so the dialog is in the run log.
+  crew-round STOPS the round the moment any member is blocked, even if you
+  approve seconds later: approve, wait until the member is idle/done, then
+  resume with `--run <dir> --from <next step>` (spec written → `--from build`;
+  both build members done → `--from gate`). If `send-keys <name> 1` leaves the
+  same dialog up, send `Enter` (the cursor is already on "Yes").
+- **Don't run an unattended approve-loop** for members' prompts without the
+  user's say-so; ask which policy they want (approve read-only / ask each
+  time / the member's own auto mode).
 - **Log your own mid-round edits** (role cards, a hand fix) in the run's
   log under "Manager notes": the critic sees them in the diff and will
   flag them as out of the spec's scope otherwise.
