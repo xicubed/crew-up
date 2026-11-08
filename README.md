@@ -141,6 +141,18 @@ A member stuck at a startup dialog (e.g. Claude's "trust this folder" in a
 new directory) is reported, not answered: answer it in that pane yourself,
 then run crew-up again and it hands the member the role card it missed.
 
+**Services.** Helper commands that should run alongside the crew go in
+`"services"` in `crew.json`; crew-up starts each one in a pane of its own (one
+`services` tab in the crew's workspace, panes named after the services) and
+skips any that's already running, so re-running is safe. Local crews only.
+
+```json
+"services": [{"name": "crew-status", "cmd": "bb crew-status"}]
+```
+
+Prime Meridian uses this for a watcher that writes every member's Herdr state
+to a file the game reads, so the crew's dots on the estate stay live.
+
 ## bin/crew-round
 
 ```

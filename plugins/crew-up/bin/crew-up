@@ -162,7 +162,11 @@ Acknowledge in one line." >/dev/null && rm -f "$CACHE/$name.card-pending"
   TODO+=("$m")
 done < <(cfg '.members[] | select(.enabled != false and .role != "manager") | @base64')
 
-[ ${#TODO[@]} -gt 0 ] || { say "nothing to start"; exit 0; }
+# Nothing to start: say so, but carry on to start any services that aren't running.
+if [ ${#TODO[@]} -eq 0 ]; then
+  say "nothing to start"
+  [ "$(cfg '(.services // []) | length')" -gt 0 ] || exit 0
+fi
 
 # ---- worktrees ("checkout": "worktree") ------------------------------------
 # Each member gets <parent>/<repo>-<name> on branch crew/<name>, made from
@@ -207,7 +211,7 @@ ntab=1
 [ $DRY = 0 ] && [ -n "$WS" ] && ntab="$("${H[@]}" tab list --workspace "$WS" 2>/dev/null | jq "[.result.tabs[] | select(.label | startswith(\"$PREFIX-\"))] | length" 2>/dev/null || echo 1)"
 [ "$ntab" -ge 1 ] || ntab=1
 
-for m in "${TODO[@]}"; do
+for m in ${TODO[@]+"${TODO[@]}"}; do
   name="$(echo "$m" | base64 --decode | jq -r .name)"
   mc="$(member_cwd "$name")"
   if [ -n "$root" ]; then
@@ -231,7 +235,7 @@ done
 # ---- start each member ----------------------------------------------------
 STARTED=()
 i=0
-for m in "${TODO[@]}"; do
+for m in ${TODO[@]+"${TODO[@]}"}; do
   f() { echo "$m" | base64 --decode | jq -r "$1"; }
   name="$(f .name)"; title="$(f '.title // .name')"; role="$(f '.role // "builder"')"
   kind="$(f '.kind // "claude"')"; model="$(f '.model // empty')"; backend="$(f '.backend // "anthropic"')"
@@ -340,6 +344,37 @@ Acknowledge in one line, then end with a line containing only this: ready-$n" >/
   hrun pane rename "$pane" "$name" >/dev/null 2>&1 || true
   STARTED+=("$name")
 done
+
+# ---- services -------------------------------------------------------------
+# "services": [{"name": "crew-status", "cmd": "bb crew-status"}, ...]: helper
+# commands that run alongside the crew (a status watcher, a dev server), all in
+# one tab of the crew's workspace, one pane each, named after the service. A
+# service whose pane already exists is left alone, so re-running is safe.
+# Local crews only for now.
+nsv="$(cfg '(.services // []) | length')"
+if [ "${nsv:-0}" -gt 0 ] && [ -z "$MACHINE" ] && [ -n "$WS" ]; then
+  have=","
+  [ $DRY = 0 ] && have=",$("${H[@]}" pane list --workspace "$WS" | jq -r '[.result.panes[].label // empty] | join(",")'),"
+  stab=""; spane=""
+  [ $DRY = 0 ] && stab="$("${H[@]}" tab list --workspace "$WS" | jq -r '[.result.tabs[] | select(.label == "services")][0].tab_id // empty')"
+  for i in $(seq 0 $((nsv - 1))); do
+    sname="$(cfg ".services[$i].name")"; scmd="$(cfg ".services[$i].cmd")"
+    [ -n "$sname" ] && [ "$sname" != null ] && [ -n "$scmd" ] && [ "$scmd" != null ] || continue
+    case "$have" in *",$sname,"*) say "service $sname already running"; continue ;; esac
+    if [ -z "$stab" ] && [ -z "$spane" ]; then
+      out="$("${H[@]}" tab create --workspace "$WS" --label services --cwd "$CWD" --no-focus 2>/dev/null || true)"
+      [ $DRY = 1 ] && { echo "  + ${H[*]} tab create --workspace $WS --label services" >&2; out='{"result":{"root_pane":{"pane_id":"dry:svc"},"tab":{"tab_id":"dry:t"}}}'; }
+      spane="$(echo "$out" | jq -r .result.root_pane.pane_id)"; stab="$(echo "$out" | jq -r .result.tab.tab_id)"
+      p="$spane"
+    else
+      anchor_s="${spane:-$("${H[@]}" pane list --workspace "$WS" | jq -r --arg t "$stab" '[.result.panes[] | select(.tab_id == $t)][-1].pane_id')}"
+      p="$(hj .result.pane.pane_id pane split --pane "$anchor_s" --direction down --cwd "$CWD" --no-focus)"; spane="$p"
+    fi
+    hrun pane rename "$p" "$sname" >/dev/null 2>&1 || true
+    hrun pane run "$p" "$scmd" >/dev/null
+    say "service $sname: $scmd (pane $p)"
+  done
+fi
 
 # ---- say hi ---------------------------------------------------------------
 if [ $HI = 1 ] && [ ${#STARTED[@]} -gt 0 ]; then
