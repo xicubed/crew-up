@@ -84,11 +84,19 @@ known in advance. The steps below are what it automates.
   alternative in the same prompt (`git diff --no-index --stat /dev/null
   <file>`); then fix the role card so it doesn't recur. crew-round saves a
   blocked member's screen as its reply, so the dialog is in the run log.
-  crew-round STOPS the round the moment any member is blocked, even if you
-  approve seconds later: approve, wait until the member is idle/done, then
-  resume with `--run <dir> --from <next step>` (spec written → `--from build`;
-  both build members done → `--from gate`). If `send-keys <name> 1` leaves the
+  With the default `"onBlocked": "stop"`, crew-round STOPS the round the
+  moment any member is blocked, even if you approve seconds later: approve,
+  wait until the member is idle/done, then resume with `--run <dir> --from
+  <next step>` (spec written → `--from build`; both build members done →
+  `--from gate`). With `"onBlocked": "wait"` (or `--on-blocked wait`) the round
+  keeps waiting while you, a prompt-fielding service or the player answer, and
+  saves each prompt to `replies/<step>-<name>.prompts.txt`: use it whenever
+  something else is answering prompts. If `send-keys <name> 1` leaves the
   same dialog up, send `Enter` (the cursor is already on "Yes").
+- **When you answer prompts, follow the crew-talk rules** (README, "Answering
+  the crew's prompts"): read the screen before answering and log the answer to
+  `crew-log.edn` with `:by :manager`; answer nothing while `hold.edn` is on;
+  never type into a pane whose dialog is gone (the player answered first).
 - **Don't run an unattended approve-loop** for members' prompts without the
   user's say-so; ask which policy they want (approve read-only / ask each
   time / the member's own auto mode).

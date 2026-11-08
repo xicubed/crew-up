@@ -10,10 +10,18 @@
 # to fix.max times. Everything lands in <runDir>/<round>-<stamp>/:
 # log.md (the timeline), replies/<step>-<name>.txt, gate-<n>.txt, diff.txt.
 #
-# Usage: crew-round ROUND.json [--config PATH] [--from STEP] [--run DIR] [--dry-run]
+# Usage: crew-round ROUND.json [--config PATH] [--from STEP] [--run DIR]
+#                  [--on-blocked stop|wait] [--dry-run]
 #   --from STEP   start at this step (skip the earlier ones)
 #   --run DIR     continue an earlier run in DIR (same {run} paths; log appended),
 #                 e.g. after answering a member's dialog: --run <dir> --from build
+#   --on-blocked  what to do when a member waits at a permission prompt or question
+#                 (default: the round file's "onBlocked", else "stop"):
+#                 stop = end the round there, so a human answers and resumes --from;
+#                 wait = keep waiting while someone else answers it (the manager, a
+#                 prompt-fielder service, the player from a dashboard); each prompt
+#                 seen is saved to replies/<step>-<name>.prompts.txt. Waiting counts
+#                 against timeoutMinutes.
 #
 # The crew must already be running (crew-up). Local machine only for now:
 # the checks read files and run the gate here.
@@ -22,19 +30,20 @@ set -euo pipefail
 die() { echo "crew-round: $*" >&2; exit 1; }
 say() { echo "crew-round: $*"; }
 
-ROUND=""; CONFIG=""; FROM=""; RUNARG=""; DRY=0
+ROUND=""; CONFIG=""; FROM=""; RUNARG=""; DRY=0; ONBLOCKED=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --config) CONFIG="$2"; shift 2 ;;
     --from) FROM="$2"; shift 2 ;;
     --run) RUNARG="$2"; shift 2 ;;
+    --on-blocked) ONBLOCKED="$2"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     -*) die "unknown option: $1" ;;
     *) ROUND="$1"; shift ;;
   esac
 done
-[ -n "$ROUND" ] || die "usage: crew-round ROUND.json [--config PATH] [--from STEP] [--run DIR] [--dry-run]"
+[ -n "$ROUND" ] || die "usage: crew-round ROUND.json [--config PATH] [--from STEP] [--run DIR] [--on-blocked stop|wait] [--dry-run]"
 [ -f "$ROUND" ] || die "round file not found: $ROUND"
 command -v jq >/dev/null || die "needs jq"
 command -v herdr >/dev/null || die "needs herdr on PATH"
@@ -60,6 +69,8 @@ RUNS="$(r '.runDir // ".crew/runs"')"
 GATE="$(r '.gate // empty')"
 FIXWHO="$(r '.fix.who // empty')"; FIXMAX="$(r '.fix.max // 2')"
 TIMEOUT="$(r '.timeoutMinutes // 30')"; TMS=$((TIMEOUT * 60000))
+[ -n "$ONBLOCKED" ] || ONBLOCKED="$(r '.onBlocked // "stop"')"
+case "$ONBLOCKED" in stop|wait) ;; *) die "onBlocked must be stop or wait, not: $ONBLOCKED" ;; esac
 STAMP="$(date +%Y%m%d-%H%M)"
 if [ -n "$RUNARG" ]; then
   [ -f "$RUNARG/log.md" ] || die "no earlier run at $RUNARG"
@@ -87,6 +98,7 @@ else
   [ -n "$QUEST" ] && echo "- Quest: \`$QUEST\`"
   echo "- Crew: $(jq -r '[.members[] | select(.enabled != false) | "\(.name) (\(.role), \(.model // .kind))"] | join(", ")' "$CONFIG")"
   echo "- Start commit: \`$(git rev-parse --short HEAD 2>/dev/null || echo none)\`"
+  echo "- On a blocked member: $ONBLOCKED"
   echo
 } > "$LOG"
 fi
@@ -105,8 +117,31 @@ need_alive() {
 # only a random token, and we poll the pane for that line (the echoed prompt
 # has the token mid-sentence, never alone on a line). A Claude member that settles without the line gets a short
 # grace period, then counts as done (it may have answered with a question).
+# on_blocked <name> <out>: the member waits at a prompt. stop mode: save the
+# screen as the reply and report "blocked". wait mode: save each new prompt
+# screen to <out>.prompts (once per distinct screen) and return 1 so the caller
+# keeps waiting while someone else answers.
+on_blocked() {
+  local who="$1" out="$2" scr h
+  if [ "$ONBLOCKED" = stop ]; then
+    herdr agent read "$who" --source visible > "$out" 2>/dev/null || true; echo blocked; return 0
+  fi
+  scr="$(herdr agent read "$who" --source visible 2>/dev/null || true)"
+  # Same prompt = same dialog: hash only what's below the last ─── rule (Claude's dialog box),
+  # since the scrollback above it flickers (a blinking ⏺ bullet would count as a new prompt).
+  h="$(printf '%s\n' "$scr" | awk '/^[[:space:]]*───/{b=""; next} {b=b $0 "\n"} END{printf "%s", b}' | tr -d '[:space:]' | cksum | cut -d' ' -f1)"
+  if [ "$h" != "${LASTPROMPT:-}" ]; then
+    LASTPROMPT="$h"; PROMPTS=$((PROMPTS + 1))
+    { echo "=== prompt $PROMPTS ($(date +%H:%M:%S))"; printf '%s\n' "$scr"; } >> "${out%.txt}.prompts.txt"
+  fi
+  return 1
+}
+
+answered() { [ "${PROMPTS:-0}" -gt 0 ] && printf ' (waited at %s prompt(s), answered by someone else)' "$PROMPTS"; }
+
 prompt_wait() {
   local who="$1" text="$2" out="$3" res st n blind kind waited=0
+  PROMPTS=0; LASTPROMPT=""
   if [ $DRY = 1 ]; then printf '%s\n' "[dry-run] would prompt $who:" "$text" > "$out"; echo done; return; fi
   kind="$(jq -r --arg n "$who" '.members[] | select(.name == $n) | .kind // "claude"' "$CONFIG")"
   blind=0; [ "$kind" = claude ] || blind=1
@@ -115,9 +150,13 @@ prompt_wait() {
 
 When you have completely finished, end your reply with a line containing only this: done-$n"
   st="$(herdr agent get "$who" | jq -r .result.agent.agent_status)"
-  [ "$st" = blocked ] && { herdr agent read "$who" --source visible > "$out" 2>/dev/null || true; echo blocked; return; }
+  while [ "$st" = blocked ]; do  # already at a prompt before we say anything
+    on_blocked "$who" "$out" && return
+    [ $((waited * 1000)) -ge "$TMS" ] && { echo "timeout (blocked)"; return; }
+    sleep 5; waited=$((waited + 5)); st="$(herdr agent get "$who" | jq -r .result.agent.agent_status)"
+  done
   res="$(herdr agent prompt "$who" "$text" --wait --timeout "$TMS" 2>&1)" || true
-  if echo "$res" | grep -q '"code":"agent_blocked"'; then herdr agent read "$who" --source visible > "$out" 2>/dev/null || true; echo blocked; return; fi
+  if echo "$res" | grep -q '"code":"agent_blocked"'; then on_blocked "$who" "$out" && return; fi
   if echo "$res" | grep -q '"code":"agent_prompt_stalled"' && [ $blind = 0 ]; then
     # Claude only: a prompt sometimes lands without submitting.
     herdr agent send-keys "$who" enter >/dev/null 2>&1 || true
@@ -126,10 +165,14 @@ When you have completely finished, end your reply with a line containing only th
   while :; do
     herdr agent read "$who" --source recent-unwrapped --lines 400 > "$out" 2>/dev/null || true
     # The token alone on a line is the reply; the echoed prompt has it mid-line.
-    grep -qE "^[[:space:][:punct:]│┃]*done-$n[[:space:][:punct:]│┃]*$" "$out" && { echo done; return; }
+    grep -qE "^[[:space:][:punct:]│┃]*done-$n[[:space:][:punct:]│┃]*$" "$out" && { echo "done$(answered)"; return; }
     st="$(herdr agent get "$who" | jq -r .result.agent.agent_status)"
-    [ "$st" = blocked ] && { herdr agent read "$who" --source visible > "$out" 2>/dev/null || true; echo blocked; return; }
-    if [ $blind = 0 ] && [ "$st" != working ] && [ $waited -ge 15 ]; then echo "idle (no done line)"; return; fi
+    if [ "$st" = blocked ]; then
+      on_blocked "$who" "$out" && return
+      [ $((waited * 1000)) -ge "$TMS" ] && { echo "timeout (blocked)"; return; }
+      sleep 5; waited=$((waited + 5)); continue
+    fi
+    if [ $blind = 0 ] && [ "$st" != working ] && [ $waited -ge 15 ]; then echo "idle (no done line)$(answered)"; return; fi
     [ $((waited * 1000)) -ge "$TMS" ] && { echo timeout; return; }
     sleep 5; waited=$((waited + 5))
   done
@@ -161,7 +204,7 @@ $EXTRA"
     wait "${pids[$k]}" || true
     st="$(cat "${files[$k]}.status" 2>/dev/null || echo unknown)"; rm -f "${files[$k]}.status"
     log "- ← **${names[$k]}**: $st (reply: \`${files[$k]#$ROOT/}\`)"
-    case "$st" in idle*|done) ;; blocked) ok=0; log "  - BLOCKED: ${names[$k]} is waiting at an approval or question; a human must look." ;; *) ok=0 ;; esac
+    case "$st" in idle*|done*) ;; blocked) ok=0; log "  - BLOCKED: ${names[$k]} is waiting at an approval or question; a human must look." ;; *) ok=0 ;; esac
   done
   local e missing=0
   while IFS= read -r e; do
@@ -208,7 +251,7 @@ for ((s = 0; s < nsteps; s++)); do
 $(tail -60 "$RUN/gate-$tries.txt")"
       st="$(prompt_wait "$FIXWHO" "$fixtext" "$RUN/replies/fix-$tries-$FIXWHO.txt")"
       log "- ← **$FIXWHO**: $st"; log ""
-      case "$st" in idle*|done) ;; *) result="STOPPED in fix round $tries ($st)"; break 2 ;; esac
+      case "$st" in idle*|done*) ;; *) result="STOPPED in fix round $tries ($st)"; break 2 ;; esac
       EXTRA="(Re-check after fix round $tries.)"
       run_step "$s" || { result="STOPPED at $id (after fix $tries)"; break 2; }
     done

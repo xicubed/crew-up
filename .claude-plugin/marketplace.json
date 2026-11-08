@@ -8,7 +8,7 @@
     {
       "name": "crew-up",
       "description": "Start, configure and manage a crew of coding agents (Claude, Hermes, ...) in Herdr panes: roster with on/off members, per-member backend (Anthropic, MindRouter, local), role cards, and the manager's playbook.",
-      "version": "0.2.3",
+      "version": "0.2.4",
       "source": "./plugins/crew-up",
       "category": "productivity",
       "keywords": ["herdr", "multi-agent", "crew", "orchestration"]

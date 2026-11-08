@@ -156,7 +156,7 @@ to a file the game reads, so the crew's dots on the estate stay live.
 ## bin/crew-round
 
 ```
-crew-round ROUND.json [--config PATH] [--from STEP] [--dry-run]
+crew-round ROUND.json [--config PATH] [--from STEP] [--run DIR] [--on-blocked stop|wait] [--dry-run]
 ```
 
 Runs one round of work through a running crew, so the coordination is code,
@@ -175,6 +175,7 @@ goes to the `fix` member and the step repeats, up to `fix.max` times.
   "gate": "bash .crew/gate.sh",                // exit 0 = pass
   "fix": { "who": "le-codeur", "max": 2 },
   "timeoutMinutes": 30,                        // per member per step
+  "onBlocked": "wait",                         // or "stop" (default); --on-blocked overrides
   "steps": [
     { "id": "spec",  "who": ["un-architecte"], "prompt": "Read {quest}; write {run}/spec.md ...",
       "expect": ["{run}/spec.md"] },
@@ -190,10 +191,43 @@ replies, expected files, gate results), `replies/<step>-<name>.txt`,
 `gate-<n>.txt`, `diff.txt`. Nothing is committed; the manager reviews and
 commits. Local machine only for now (it reads files and runs the gate here).
 
+**When a member blocks** (a permission prompt or a question), `onBlocked`
+decides. `stop` (the default) ends the round there and saves the screen as the
+member's reply: a human answers, then resumes with `--run <dir> --from <next
+step>`. `wait` keeps the round going while *someone else* answers: the manager
+by hand, a prompt-fielding service (below), or the player from a dashboard.
+Every prompt it saw is saved to `replies/<step>-<name>.prompts.txt` and the log
+says how many the member waited at. Waiting counts against `timeoutMinutes`.
+crew-round itself never answers a prompt.
+
 How it knows a member is finished: Herdr's `--wait` (working → idle) where
 Herdr can read the agent's state, and for every member a random token the
 prompt asks them to put alone on their last line. The token matters for
 kinds Herdr can't see working (Hermes today).
+
+## Answering the crew's prompts (the crew-talk files)
+
+Who answers a member's permission prompt is the project's choice, not
+crew-up's: the manager, a small service that fields routine ones, or the
+human from a dashboard. So that these can be mixed and swapped (a different
+manager agent, a different dashboard), they share three small EDN files in a
+private, gitignored directory the project picks (Prime Meridian uses
+`state/`). crew-up only documents them; each project ships its own helpers,
+usually as crew-up `services` (Prime Meridian's `bb crew-status` and `bb
+crew-bridge` are the reference implementation, with its in-game 💭).
+
+| File | Written by | Shape |
+|---|---|---|
+| `crew.edn` | the status watcher | `{:as-of ms :agents {member {:status :idle\|:working\|:blocked\|:done :prompt {:id sha1 :kind :bash\|:unknown :text str :risky bool :since ms}}} :titles {member "Title"}}`: names, states and the *parsed* prompt only, never a raw screen. Publish a prompt only after two polls ≥ 2 s apart show the same real dialog: Herdr briefly reports a thinking Claude as `blocked`. |
+| `crew-log.edn` | whoever answers | append-only vector, last 200: `{:at ms :member kw :action :allowed\|:declined :by kw :prompt-id sha1 :text str}`. `:by` is a role, not a name (`:manager`, `:fielder`, `:player`); dashboards take display names from `crew.json` titles. Same `:prompt-id` as `crew.edn`, so "already answered by …" works. |
+| `hold.edn` | the dashboard's "I'll answer" switch | `{:on bool :at ms}`. While `:on`, automatic fielders answer nothing and every prompt goes to the human. |
+
+Rules every answerer follows: read the screen *before* answering (the dialog
+is gone after) and answer only the prompt whose id you saw; never type into a
+pane whose screen no longer shows a dialog (someone answered first); decide
+"risky" in one place (one classifier, shared by the fielder and the bridge);
+risky and unreadable prompts are never auto-answered. Run rounds with
+`"onBlocked": "wait"` when a fielder is running.
 
 ## Hermes
 
